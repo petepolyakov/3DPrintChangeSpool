@@ -7,4 +7,4 @@ I do not use the Pause command; instead, I use the Add Change Color command to s
 
 Parameters are selfexplanatory 
 
-"C:\YourPathToPython\python.exe" "f:\YourPathToScript\color_change_plugin.py" --spool_weight 1000 --filament_diameter 1.75 --filament_density 1.25 --extrusion_mode relative --input "c:\YourPathToGcodeFile\PrintFile.gcode" --output "c:\YourPathToGcodeFileOutput\PrintFileOutput.gcode" --debug
+"C:\YourPathToPython\python.exe" "f:\YourPathToScript\color_change_plugin.py" --spool_weight 1000 --filament_diameter 1.75 --filament_density 1.25 --extrusion_mode relative --input "c:\YourPathToGcodeFile\PrintFile.gcode" --output "c:\YourPathToGcodeFileOutput\PrintFileOutput.gcode" --scale 0.015 --debug
