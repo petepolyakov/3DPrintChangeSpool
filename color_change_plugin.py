@@ -45,6 +45,10 @@ def parse_arguments():
                         help="Fraction of spool weight to leave unused (default: 0.03, i.e. trigger at 97% usage)")
     parser.add_argument('--layer_based', action='store_true',
                         help="Only insert color change command at layer change markers")
+    parser.add_argument('--feedrate_threshold', type=float, default=3000.0,
+                        help="Feedrate threshold (mm/min) above which extrusion moves are not counted")
+    parser.add_argument('--scale', type=float, default=1.0,
+                        help="Scaling factor to adjust computed filament weight (default: 1.0)")
     parser.add_argument('--debug', action='store_true',
                         help="Enable debug logging output")
     parser.add_argument('--debug_interval', type=int, default=100,
@@ -88,32 +92,42 @@ def extract_spool_weight_from_header(lines):
     logging.debug("No spool weight found in header.")
     return None
 
-def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_change_command, safety_margin, debug, debug_interval, layer_based=False):
+def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode,
+                  color_change_command, safety_margin, feedrate_threshold,
+                  scale, debug, debug_interval, layer_based=False):
     """
     Processes the G-code file.
     
     In non-layer-based mode, the script inserts the color change command immediately when the cumulative
-    extruded filament reaches the threshold. In layer-based mode, the script waits for a layer change marker
+    extruded filament reaches the threshold. In layer-based mode, it waits for a layer change marker
     (lines starting with "; layer") and then inserts the command if the threshold is met.
+    
+    Also calculates the total filament weight used by summing extrusion moves (only counting those moves that
+    have at least one X, Y, or Z coordinate and a feedrate below the threshold). The computed weight is scaled
+    by the given factor.
     """
     new_lines = []
-    cumulative_weight = 0.0
+    cumulative_weight = 0.0  # For threshold checking (this resets after each insertion)
+    total_weight = 0.0       # Total extruded weight (never reset)
+    # Apply scale factor to the conversion factor
+    conv = conversion_factor * scale
     trigger_weight = spool_weight * (1 - safety_margin)
     last_extrusion = 0.0  # Used for absolute mode
 
     for idx, line in enumerate(lines):
         stripped_line = line.strip()
 
-        # In layer-based mode, check for a layer marker (adjust this marker if needed)
+        # Layer-based mode: check for layer marker (adjust marker if needed)
         if layer_based and stripped_line.startswith("; layer"):
             if cumulative_weight >= trigger_weight:
-                logging.debug("Layer-based insertion at line %d: cumulative weight %.2fg exceeds threshold %.2fg", idx, cumulative_weight, trigger_weight)
+                logging.debug("Layer-based insertion at line %d: cumulative weight %.2fg exceeds threshold %.2fg",
+                              idx, cumulative_weight, trigger_weight)
                 new_lines.append(f"{color_change_command} ; Color change triggered after ~{trigger_weight:.2f}g used at layer change")
                 cumulative_weight -= trigger_weight
             new_lines.append(line.rstrip('\n'))
             continue
 
-        # Process G92 commands that reset the extrusion counter.
+        # Handle G92 commands that reset the extrusion counter.
         if stripped_line.startswith("G92") and "E" in stripped_line:
             e_value = extract_extrusion_value(stripped_line)
             last_extrusion = e_value
@@ -121,8 +135,20 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
             new_lines.append(line.rstrip('\n'))
             continue
 
-        # Process extrusion moves.
+        # Process G1 moves with extrusion (E) only if the line contains at least one X, Y, or Z coordinate.
         if stripped_line.startswith("G1") and "E" in stripped_line:
+            if not any(axis in stripped_line for axis in ("X", "Y", "Z")):
+                new_lines.append(line.rstrip('\n'))
+                continue
+
+            # Check for a feedrate and skip moves with feedrate above the threshold.
+            feedrate_match = re.search(r'F(\d+\.?\d*)', stripped_line)
+            if feedrate_match:
+                feedrate = float(feedrate_match.group(1))
+                if feedrate > feedrate_threshold:
+                    new_lines.append(line.rstrip('\n'))
+                    continue
+
             e_value = extract_extrusion_value(stripped_line)
             if extrusion_mode == 'relative':
                 extrusion_delta = e_value
@@ -131,15 +157,15 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
                 last_extrusion = e_value
 
             if extrusion_delta > 0:
-                weight_delta = extrusion_delta * conversion_factor
+                weight_delta = extrusion_delta * conv
                 cumulative_weight += weight_delta
+                total_weight += weight_delta
 
                 if debug and (idx % debug_interval == 0):
                     logging.debug("Line %d: Extrusion delta: %.4f mm, Weight delta: %.6fg, Cumulative weight: %.2fg",
                                   idx, extrusion_delta, weight_delta, cumulative_weight)
 
                 if not layer_based:
-                    # Insert command immediately if threshold is reached.
                     while cumulative_weight >= trigger_weight:
                         logging.debug("Inserting color change command at cumulative weight: %.2fg (Threshold: %.2fg)",
                                       cumulative_weight, trigger_weight)
@@ -147,9 +173,11 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
                         cumulative_weight -= trigger_weight
 
         new_lines.append(line.rstrip('\n'))
+
     if debug:
         logging.debug("Final cumulative weight: %.2fg", cumulative_weight)
-    return new_lines
+        logging.debug("Total filament weight used (model): %.2fg", total_weight)
+    return new_lines, total_weight
 
 def main():
     try:
@@ -167,20 +195,26 @@ def main():
                 sys.exit(2)
 
         area = math.pi * (args.filament_diameter / 2) ** 2
+        # conversion_factor in g/mm (for filament in mm^2 and density in g/cm^3)
         conversion_factor = (area * args.filament_density) / 1000.0
         logging.debug("Calculated filament area: %.6f mm², Conversion factor: %.6f g/mm", area, conversion_factor)
 
-        processed_lines = process_gcode(
+        processed_lines, total_weight = process_gcode(
             lines,
             spool_weight=spool_weight,
             conversion_factor=conversion_factor,
             extrusion_mode=args.extrusion_mode,
             color_change_command=args.color_change_command,
             safety_margin=args.safety_margin,
+            feedrate_threshold=args.feedrate_threshold,
+            scale=args.scale,
             debug=args.debug,
             debug_interval=args.debug_interval,
             layer_based=args.layer_based
         )
+
+        # Append a comment line with the total filament weight used.
+        processed_lines.append(f"; TOTAL FILAMENT WEIGHT USED: {total_weight:.2f}g")
 
         output_dir = os.path.dirname(args.output)
         if output_dir and not os.path.exists(output_dir):
@@ -191,9 +225,11 @@ def main():
                 f.write(line + "\n")
 
         logging.info("Processed G-code has been saved to %s", args.output)
+        logging.info("Total filament weight used for model: %.2fg", total_weight)
     except Exception as e:
         logging.error("An error occurred: %s", e)
         sys.exit(2)
 
 if __name__ == '__main__':
     main()
+
