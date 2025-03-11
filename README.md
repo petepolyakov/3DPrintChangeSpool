@@ -2,6 +2,7 @@
 Process G-codes to pause a 3D print before it runs out of filament.
 Effective for large prints when more than one spool has to be used. For better calculations, make sure you check additional parameters.
 **At this point, the script hasn't been battle-tested but is working in dry-run mode.**
+For use with 1mm Nozzle, 1.75mm filament PETG, FLOW 19, 1.1 Multiplier 
 
 I do not use the Pause command; instead, I use the Add Change Color command to simplify the spool change.
 
