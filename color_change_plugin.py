@@ -1,20 +1,18 @@
-/*
- * Copyright 2025 PETE POLYAKOV
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+#
+# Copyright 2025 PETE POLYAKOV
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-     
 
 
 #!/usr/bin/env python3
@@ -45,6 +43,8 @@ def parse_arguments():
                         help="G-code command to trigger a color change (default: M600)")
     parser.add_argument('--safety_margin', type=float, default=0.03,
                         help="Fraction of spool weight to leave unused (default: 0.03, i.e. trigger at 97% usage)")
+    parser.add_argument('--layer_based', action='store_true',
+                        help="Only insert color change command at layer change markers")
     parser.add_argument('--debug', action='store_true',
                         help="Enable debug logging output")
     parser.add_argument('--debug_interval', type=int, default=100,
@@ -60,6 +60,9 @@ def setup_logging(debug):
         logging.debug("Debug mode enabled.")
 
 def extract_extrusion_value(line):
+    """
+    Extracts the value following the 'E' parameter in a G-code line.
+    """
     match = re.search(r'(?<=\sE)(-?\d+\.?\d*)', line)
     if match:
         try:
@@ -69,6 +72,10 @@ def extract_extrusion_value(line):
     return 0.0
 
 def extract_spool_weight_from_header(lines):
+    """
+    Attempts to parse the spool weight from the G-code header.
+    Looks for a comment line containing 'spool weight'.
+    """
     for line in lines:
         if "spool weight" in line.lower():
             match = re.search(r'(\d+(\.\d+)?)', line)
@@ -81,7 +88,14 @@ def extract_spool_weight_from_header(lines):
     logging.debug("No spool weight found in header.")
     return None
 
-def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_change_command, safety_margin, debug, debug_interval):
+def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_change_command, safety_margin, debug, debug_interval, layer_based=False):
+    """
+    Processes the G-code file.
+    
+    In non-layer-based mode, the script inserts the color change command immediately when the cumulative
+    extruded filament reaches the threshold. In layer-based mode, the script waits for a layer change marker
+    (lines starting with "; layer") and then inserts the command if the threshold is met.
+    """
     new_lines = []
     cumulative_weight = 0.0
     trigger_weight = spool_weight * (1 - safety_margin)
@@ -89,6 +103,17 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
 
     for idx, line in enumerate(lines):
         stripped_line = line.strip()
+
+        # In layer-based mode, check for a layer marker (adjust this marker if needed)
+        if layer_based and stripped_line.startswith("; layer"):
+            if cumulative_weight >= trigger_weight:
+                logging.debug("Layer-based insertion at line %d: cumulative weight %.2fg exceeds threshold %.2fg", idx, cumulative_weight, trigger_weight)
+                new_lines.append(f"{color_change_command} ; Color change triggered after ~{trigger_weight:.2f}g used at layer change")
+                cumulative_weight -= trigger_weight
+            new_lines.append(line.rstrip('\n'))
+            continue
+
+        # Process G92 commands that reset the extrusion counter.
         if stripped_line.startswith("G92") and "E" in stripped_line:
             e_value = extract_extrusion_value(stripped_line)
             last_extrusion = e_value
@@ -96,9 +121,9 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
             new_lines.append(line.rstrip('\n'))
             continue
 
+        # Process extrusion moves.
         if stripped_line.startswith("G1") and "E" in stripped_line:
             e_value = extract_extrusion_value(stripped_line)
-            extrusion_delta = 0.0
             if extrusion_mode == 'relative':
                 extrusion_delta = e_value
             else:
@@ -113,11 +138,13 @@ def process_gcode(lines, spool_weight, conversion_factor, extrusion_mode, color_
                     logging.debug("Line %d: Extrusion delta: %.4f mm, Weight delta: %.6fg, Cumulative weight: %.2fg",
                                   idx, extrusion_delta, weight_delta, cumulative_weight)
 
-                while cumulative_weight >= trigger_weight:
-                    logging.debug("Inserting color change command at cumulative weight: %.2fg (Threshold: %.2fg)",
-                                  cumulative_weight, trigger_weight)
-                    new_lines.append(f"{color_change_command} ; Color change triggered after ~{trigger_weight:.2f}g used")
-                    cumulative_weight -= trigger_weight
+                if not layer_based:
+                    # Insert command immediately if threshold is reached.
+                    while cumulative_weight >= trigger_weight:
+                        logging.debug("Inserting color change command at cumulative weight: %.2fg (Threshold: %.2fg)",
+                                      cumulative_weight, trigger_weight)
+                        new_lines.append(f"{color_change_command} ; Color change triggered after ~{trigger_weight:.2f}g used")
+                        cumulative_weight -= trigger_weight
 
         new_lines.append(line.rstrip('\n'))
     if debug:
@@ -151,7 +178,8 @@ def main():
             color_change_command=args.color_change_command,
             safety_margin=args.safety_margin,
             debug=args.debug,
-            debug_interval=args.debug_interval
+            debug_interval=args.debug_interval,
+            layer_based=args.layer_based
         )
 
         output_dir = os.path.dirname(args.output)
